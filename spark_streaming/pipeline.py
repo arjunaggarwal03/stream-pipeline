@@ -1,6 +1,6 @@
 import sys
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, window
+from pyspark.sql.functions import from_json, col, window, from_unixtime
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
 
 # Adjust for your environment if needed
@@ -26,6 +26,8 @@ df = (spark.readStream
         .format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BROKER)
         .option("subscribe", TOPIC_NAME)
+        .option("failOnDataLoss", "false")
+        .option("startingOffsets", "latest")
         .load())
 
 # 2. Convert the binary 'value' field into JSON
@@ -33,11 +35,19 @@ json_df = df.selectExpr("CAST(value AS STRING)") \
             .select(from_json(col("value"), schema).alias("data")) \
             .select("data.*")
 
+# First cast timestamp to proper type
+json_df_with_timestamp = json_df \
+    .withColumn("timestamp", from_unixtime(col("timestamp")).cast("timestamp"))
+
+# Add watermark to handle late data
+json_df_with_watermark = json_df_with_timestamp \
+    .withWatermark("timestamp", "1 minute")
+
 # 3. Simple windowed aggregation: average temperature per sensor in 1-minute windows
-agg_df = (json_df
+agg_df = (json_df_with_watermark
             .groupBy(
                 col("sensor_id"),
-                window(col("timestamp").cast("timestamp"), "1 minute")
+                window(col("timestamp"), "1 minute")
             )
             .avg("temperature")
             .select(
@@ -48,25 +58,12 @@ agg_df = (json_df
             ))
 
 # 4. Write to Cassandra
-#    First, create a keyspace/table if you haven't already:
-#      CREATE KEYSPACE sensor_keyspace 
-#        WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'};
-#
-#      CREATE TABLE sensor_keyspace.sensor_aggregates (
-#        sensor_id text,
-#        window_start timestamp,
-#        window_end timestamp,
-#        avg_temp double,
-#        PRIMARY KEY (sensor_id, window_start)
-#      );
-#
-#    Spark-Cassandra connector must be added to Spark if not included by default.
 query = (agg_df
             .writeStream
             .format("org.apache.spark.sql.cassandra")
             .options(table="sensor_aggregates", keyspace="sensor_keyspace")
             .option("checkpointLocation", "/tmp/spark_checkpoints/sensor_pipeline")
-            .outputMode("update")
+            .outputMode("append")
             .start())
 
 # 5. Start the streaming query and wait for termination
