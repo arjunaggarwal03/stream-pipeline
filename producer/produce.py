@@ -2,6 +2,7 @@ import json
 import time
 import random
 from kafka import KafkaProducer
+import sys
 
 # Adjust if your Kafka is reachable at a different host/port
 KAFKA_BROKER = "localhost:9092"
@@ -15,16 +16,25 @@ def generate_data():
         "timestamp": time.time()
     }
 
-producer = KafkaProducer(bootstrap_servers=KAFKA_BROKER)
+producer = KafkaProducer(
+    bootstrap_servers=KAFKA_BROKER,
+    value_serializer=lambda x: json.dumps(x).encode('utf-8')
+)
+
 print(f"Producing messages to Kafka topic '{TOPIC_NAME}'. Press Ctrl+C to stop.")
 
 try:
     while True:
-        data_point = generate_data()
-        producer.send(TOPIC_NAME, json.dumps(data_point).encode('utf-8'))
-        print("Sent:", data_point)
-        time.sleep(1)  # throttle messages (1 per second)
+        for sensor_id in range(1, 6):
+            data = generate_data()
+            producer.send('sensor_data', data)
+            print(f"Sent: {data}")
+        time.sleep(1)
 except KeyboardInterrupt:
-    print("\nStopping producer...")
-finally:
+    print("\nGracefully shutting down producer...")
     producer.close()
+    sys.exit(0)
+except Exception as e:
+    print(f"Error in producer: {str(e)}")
+    producer.close()
+    sys.exit(1)
